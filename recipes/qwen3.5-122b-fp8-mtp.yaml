@@ -1,0 +1,75 @@
+# Recipe: Qwen3.5-122B-A10B-FP8 with MTP speculative decoding
+# Based on recipes/qwen3.5-122b-fp8.yaml, adds --speculative-config using the
+# same {{"method":"mtp",...,"moe_backend":"triton"}} pattern as
+# recipes/qwen3.6-35b-a3b-nvfp4.yaml. moe_backend pinned to triton
+# defensively -- an unrelated auto-selected kernel (GDN prefill via
+# FlashInfer JIT) deadlocked multi-node on this hardware
+# (vllm-project/vllm#41865), so pin rather than auto-select where a
+# known-working explicit choice exists.
+#
+# num_speculative_tokens=2 confirmed working 2026-08-21/22 (real deploy):
+# ~65% MTP acceptance, ~40.5 tok/s (500-token generation). Tried 3 on
+# 2026-08-22 to match Qwen3.8's empirically-found-optimal MTP=3, but
+# measured WORSE here: ~58% acceptance, ~36.6 tok/s -- confirms the
+# startup warning ("Enabling num_speculative_tokens > 1 will run multiple
+# times of forward on same MTP layer, which may result in lower acceptance
+# rate") actually bites for this model's MTP head, unlike Qwen3.8's dense
+# architecture. Reverted to 2. Don't assume MTP settings transfer between
+# models -- re-measure via vllm:spec_decode_num_accepted_tokens_total /
+# vllm:spec_decode_num_draft_tokens_total before changing this again.
+#
+# --max-num-seqs 4 added 2026-08-22 (previously unset, meaning the real
+# ceiling was whatever KV cache allowed -- ~2.64x concurrency at 262144
+# max_model_len with gpu_memory_utilization=0.68). Raised
+# gpu_memory_utilization default 0.8->0.75 room is scaled via --gpu-mem at
+# launch time instead of editing this default, since actual headroom
+# depends on what else is running on dgx2 (embedding model, monitoring) --
+# see README "Recipe Overrides" section, use `--gpu-mem 0.75` when running
+# this recipe on a dgx2 with the qwen3-embed service still up.
+
+recipe_version: "1"
+name: Qwen3.5-122B-FP8-MTP
+description: vLLM serving Qwen3.5-122B-FP8 with MTP speculative decoding
+
+# HuggingFace model to download (optional, for --download-model)
+model: Qwen/Qwen3.5-122B-A10B-FP8
+
+# Only cluster is supported
+cluster_only: true
+
+# Container image to use
+container: vllm-node
+
+# No mods required
+mods:
+  - mods/fix-qwen3.5-chat-template
+
+# Default settings (can be overridden via CLI)
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 2
+  gpu_memory_utilization: 0.8
+  max_model_len: 262144
+  max_num_batched_tokens: 8192
+
+# Environment variables
+env: {}
+
+# The vLLM serve command template
+command: |
+  vllm serve Qwen/Qwen3.5-122B-A10B-FP8 \
+    --max-model-len {max_model_len} \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --port {port} \
+    --host {host} \
+    --load-format instanttensor \
+    --enable-prefix-caching \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser qwen3 \
+    --chat-template unsloth.jinja \
+    --speculative-config '{{"method":"mtp","num_speculative_tokens":2,"moe_backend":"triton"}}' \
+    --max-num-seqs 4 \
+    -tp {tensor_parallel} --distributed-executor-backend ray \
+    --max-num-batched-tokens {max_num_batched_tokens}
