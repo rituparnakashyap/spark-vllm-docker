@@ -33,15 +33,23 @@
 # comparison -- don't use it as the baseline to compare future runs
 # against, use a fresh bench.sh run instead).
 #
-# max-num-seqs=8 set 2026-08-25. KV cache headroom at gpu_memory_utilization=0.5
-# supports ~7.4x concurrency at FULL 262144-token context (so 8 concurrent
-# requests all simultaneously at max context would technically exceed
-# budget) -- accepted anyway since real observed average context is far
-# below max (~55K tokens in practice, per this project's Grafana "Avg
-# Context Size" panel), giving much more effective headroom than the
-# worst-case number suggests. Revisit gpu_memory_utilization upward if
-# max-num-seqs is ever raised further or real usage trends toward
-# consistently long contexts.
+# max_num_seqs=8 set 2026-08-25. KV cache headroom at gpu_memory_utilization=0.5
+# measured 8.70x concurrency at FULL 262144-token context on the actual
+# live launch (comfortable margin over 8, better than initially estimated
+# from an older measurement -- always check the real
+# "Maximum concurrency for <max_model_len> tokens per request" line in
+# this model's own startup log rather than trusting this comment's number
+# if gpu_memory_utilization or max_model_len ever change).
+#
+# Exposed as a proper {max_num_seqs} template default (not hardcoded in
+# the command) so it's a visible, editable knob like the other params --
+# but note run-recipe.py's --port/--host/--tp/--gpu-mem/--max-model-len
+# CLI overrides are a FIXED set (checked the source directly, 2026-08-25)
+# with no generic defaults->flag mechanism, so there is no
+# --max-num-seqs CLI flag. To override per-launch without editing this
+# file, use the `-- --max-num-seqs N` passthrough documented in the main
+# README's "Recipe Overrides and Additional vLLM Arguments" section --
+# vLLM takes the last occurrence when a flag is repeated.
 
 recipe_version: "1"
 name: Qwen3.8-27B-FP8-MTP
@@ -67,6 +75,7 @@ defaults:
   tensor_parallel: 2
   gpu_memory_utilization: 0.5
   max_model_len: 262144
+  max_num_seqs: 8
 
 # Environment variables
 env: {}
@@ -81,7 +90,7 @@ command: |
     --kv-cache-dtype fp8 \
     --gpu-memory-utilization {gpu_memory_utilization} \
     --max-model-len {max_model_len} \
-    --max-num-seqs 8 \
+    --max-num-seqs {max_num_seqs} \
     --reasoning-parser qwen3 \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_xml \
