@@ -1,0 +1,108 @@
+# Recipe: Qwen3.5-122B-A10B-NVFP4 with MTP speculative decoding
+# Sibling to qwen3.5-122b-fp8-mtp.yaml -- same structure, NVFP4 checkpoint.
+#
+# MTP weights are ALREADY correctly included in nvidia/Qwen3.5-122B-A10B-NVFP4
+# (confirmed 2026-08-24 by directly inspecting model.safetensors.index.json:
+# all 785 mtp.* tensors present, kept in BF16 while the base model's expert
+# weights are NVFP4-quantized -- exactly the mixed-precision pattern this
+# project assumed would need a manual merge, except NVIDIA already did it
+# correctly in the official release). No manual MTP merge needed for this
+# checkpoint specifically -- do NOT assume this holds for other NVFP4
+# variants (e.g. RedHatAI's) without checking their index.json the same way.
+#
+# moe_backend pinned to triton defensively, same reasoning as the FP8
+# recipe (GDN prefill FlashInfer JIT deadlock, vllm-project/vllm#41865) --
+# but ALSO watch the startup log for whether the base model's FP4 MoE
+# layers land on native CUTLASS or fall back to Marlin (vLLM issue #50925,
+# open as of last check) -- the tp=2-specific CUTLASS FP4 gemm blocker
+# (issue #30163) was fixed upstream in PR #35568 (merged 2026-05-15) and
+# should be present in this deployment's vLLM build
+# (0.27.2rc1.dev54+gb96bcd0b4.d20260813, built 2026-08-13), but this is
+# the first real attempt at tp=2 NVFP4 for this model on this hardware --
+# treat any launch success/failure as new information, not a known-good
+# reproduction.
+#
+# MTP tuning: do NOT assume the FP8 recipe's num_speculative_tokens=2
+# finding transfers -- different quantization can change draft/target
+# logit agreement and therefore acceptance rate. Sweep 2 vs 3 empirically
+# via vllm:spec_decode_num_accepted_tokens_total /
+# vllm:spec_decode_num_draft_tokens_total, same as was done for FP8.
+#
+# 2026-08-24 measured baseline at MTP=2, max-num-seqs=4: ~35 tok/s
+# single-stream, 66.5% MTP acceptance (861/1294), 39.04GB/node weights,
+# 31.79GB/node KV reserved -> 4,239,742 token KV capacity, 16.17x
+# concurrency headroom at full 262144 context. --max-num-seqs 8 is safe
+# from a memory standpoint (KV budget already supports far more than 8x
+# concurrency at gpu_memory_utilization=0.6) -- it's a pure scheduler cap,
+# not an additional reservation, confirmed applied without issue.
+#
+# MTP=3 retested same day on NVFP4/Marlin (not just assumed from the FP8
+# result): ~35.1 tok/s (34.30-36.24, no real change from MTP=2) but
+# acceptance dropped to 56.1% (948/1689) vs MTP=2's 66.5% -- same pattern
+# as FP8: this model's MTP head doesn't benefit from deeper speculation
+# regardless of quantization. Reverted to MTP=2, keep it there -- don't
+# re-try MTP=3 again without a real reason to suspect something else
+# changed (e.g. a vLLM upgrade that touches the MTP scheduler).
+
+recipe_version: "1"
+name: Qwen3.5-122B-NVFP4-MTP
+description: vLLM serving Qwen3.5-122B-A10B-NVFP4 with MTP speculative decoding
+
+# HuggingFace model to download (optional, for --download-model)
+model: nvidia/Qwen3.5-122B-A10B-NVFP4
+
+# Only cluster is supported
+cluster_only: true
+
+# Container image to use
+container: vllm-node
+
+# No mods required
+mods:
+  - mods/fix-qwen3.5-chat-template
+
+# Default settings (can be overridden via CLI)
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 2
+  gpu_memory_utilization: 0.6
+  max_model_len: 262144
+  max_num_batched_tokens: 8192
+
+# Environment variables
+# VLLM_USE_DEEP_GEMM=0 -- root cause found 2026-08-24: vLLM's
+# should_auto_disable_deep_gemm() checks model_type + GPU capability
+# family only, and both the FP8 and NVFP4 checkpoints report the
+# identical model_type=qwen3_5_moe_text (confirmed by inspecting both
+# config.json directly) -- so the check WOULD disable DeepGEMM for
+# either. FP8's quantization code path calls this check (confirmed via
+# its own "Auto-disabled DeepGemm..." log line); the NVFP4/ModelOpt
+# code path apparently never calls it, so DeepGEMM stays enabled and
+# its init hangs on dgx2 (rank1) after "E8M0 enabled on current
+# platform", stalling the whole launch for the full 30-min Gloo
+# timeout. This is a real gap in vLLM's NVFP4 integration, not
+# something wrong with this deployment -- forcing the var here
+# reproduces the same end-state FP8 gets automatically.
+env:
+  VLLM_USE_DEEP_GEMM: "0"
+
+# The vLLM serve command template
+command: |
+  vllm serve nvidia/Qwen3.5-122B-A10B-NVFP4 \
+    --max-model-len {max_model_len} \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --port {port} \
+    --host {host} \
+    --enable-prefix-caching \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser qwen3 \
+    --chat-template unsloth.jinja \
+    --speculative-config '{{"method":"mtp","num_speculative_tokens":3,"moe_backend":"triton"}}' \
+    --moe-backend marlin \
+    --attention-backend TRITON_ATTN \
+    --enforce-eager \
+    --max-num-seqs 8 \
+    -tp {tensor_parallel} --distributed-executor-backend ray \
+    --max-num-batched-tokens {max_num_batched_tokens}
