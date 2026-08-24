@@ -32,6 +32,16 @@
 # from noisy Grafana rate() aggregate sampling, not a clean single-stream
 # comparison -- don't use it as the baseline to compare future runs
 # against, use a fresh bench.sh run instead).
+#
+# max-num-seqs=8 set 2026-08-25. KV cache headroom at gpu_memory_utilization=0.5
+# supports ~7.4x concurrency at FULL 262144-token context (so 8 concurrent
+# requests all simultaneously at max context would technically exceed
+# budget) -- accepted anyway since real observed average context is far
+# below max (~55K tokens in practice, per this project's Grafana "Avg
+# Context Size" panel), giving much more effective headroom than the
+# worst-case number suggests. Revisit gpu_memory_utilization upward if
+# max-num-seqs is ever raised further or real usage trends toward
+# consistently long contexts.
 
 recipe_version: "1"
 name: Qwen3.8-27B-FP8-MTP
@@ -71,6 +81,7 @@ command: |
     --kv-cache-dtype fp8 \
     --gpu-memory-utilization {gpu_memory_utilization} \
     --max-model-len {max_model_len} \
+    --max-num-seqs 8 \
     --reasoning-parser qwen3 \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_xml \
