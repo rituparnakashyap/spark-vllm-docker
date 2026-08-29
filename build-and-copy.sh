@@ -1141,7 +1141,15 @@ if [ "$NO_BUILD" = false ]; then
                 VLLM_CMD+=("--build-arg" "VLLM_PRS=$VLLM_PRS")
             fi
 
-            if [ "$EXP_B12X" = true ]; then
+            # VLLM_PRESERVE_SM12X_TARGET is also settable standalone (not just
+            # via --exp-b12x), since --exp-b12x additionally swaps in the
+            # experimental local-inference-lab/vllm fork -- far more change
+            # than "give me native sm_121a kernels on mainline vLLM". Verified
+            # 2026-08-28: this flag alone is necessary AND sufficient to get
+            # sm_121a cubins into _C_stable_libtorch.abi3.so /
+            # _moe_C_stable_libtorch.abi3.so (confirmed via cuobjdump) without
+            # touching VLLM_REPO/VLLM_REF.
+            if [ "$EXP_B12X" = true ] || [ "${VLLM_PRESERVE_SM12X_TARGET:-0}" = "1" ]; then
                 # Preserve selected Blackwell subarchitectures. This prevents
                 # 10.3a and 12.1a from being reduced to plain sm_100/sm_120
                 # without overriding explicit family-target selections.
